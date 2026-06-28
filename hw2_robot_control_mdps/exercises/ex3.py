@@ -2,6 +2,7 @@ import numpy as np
 
 import __init__
 from scripts.utils import quat_mul, quat_conjugate, quat_normalize, rot_mat_to_quat
+from scipy.spatial.transform import Rotation, RigidTransform
 
 """
 # Important note:
@@ -10,19 +11,19 @@ from scripts.utils import quat_mul, quat_conjugate, quat_normalize, rot_mat_to_q
 # entire array reference, otherwise the physics engine will not see your changes!
 """
 
+
 def reset_robot(default_qpos: np.ndarray) -> np.ndarray:
     """
     TODO: Implement robot reset to its default joint positions with some small uniform noise (-0.5, 0.5).
     You can add random noise to the default joint positions using np.random.uniform.
-    
+
     Inputs:
     - default_qpos: np.ndarray. The default joint positions. Dimensionality: 1D array, Shape: (num_joints,).
 
     Returns:
     - reset_qpos: np.ndarray. The joint positions to reset the robot to. Dimensionality: 1D array, Shape: (num_joints,).
     """
-    raise NotImplementedError()
-    
+    return default_qpos + np.random.uniform(low=-0.5, high=0.5, size=default_qpos.size)
 
 
 def reset_target_position(base_pos: np.ndarray) -> np.ndarray:
@@ -35,19 +36,22 @@ def reset_target_position(base_pos: np.ndarray) -> np.ndarray:
 
     Inputs:
     - base_pos: np.ndarray. The 3D position of the robot's base. Dimensionality: 1D array, Shape: (3,).
-    
+
     Returns:
     - target_pos: np.ndarray. The 3D position of the target relative to the base. Dimensionality: 1D array, Shape: (3,).
     """
-    raise NotImplementedError()
+    new_x = base_pos[0] + np.random.uniform(0.2, 0.4)
+    new_y = base_pos[1] + np.random.uniform(-0.2, 0.2)
+    new_z = base_pos[2] + np.random.uniform(0.1, 0.4)
+    return np.array([new_x, new_y, new_z])
 
 
 def process_action(action: np.ndarray, jnt_range: np.ndarray) -> np.ndarray:
     """
     TODO: Convert normalized actions [-1, 1] to target joint positions.
-    
+
     You should map the normalized action [-1, 1] to the actual joint range defined by jnt_range. The mapping should be linear,
-    where -1 corresponds to the lower limit of the joint and 1 corresponds to the upper limit of the joint, 
+    where -1 corresponds to the lower limit of the joint and 1 corresponds to the upper limit of the joint,
     and 0 corresponds to the midpoint of the joint range.
 
     Inputs:
@@ -57,15 +61,16 @@ def process_action(action: np.ndarray, jnt_range: np.ndarray) -> np.ndarray:
     Returns:
     - target_qpos: np.ndarray. Target joint positions to apply as control. Dimensionality: 1D array, Shape: (num_joints,).
     """
-    raise NotImplementedError()
+    dist = (jnt_range[:, 1] - jnt_range[:, 0]) / 2.0
+    return dist * (action + 1.0) + jnt_range[:, 0]
 
 
 def compute_reward(ee_tracking_error: float) -> float:
     """
-    TODO: 
-    Calculate the reward based on the distance (error) to the target. 
-    Remember from the lecture slides that there are different types of rewards, e.g. dense and sparse. 
-    In reward design, it is often useful to combine these approaches. 
+    TODO:
+    Calculate the reward based on the distance (error) to the target.
+    Remember from the lecture slides that there are different types of rewards, e.g. dense and sparse.
+    In reward design, it is often useful to combine these approaches.
     We do not expect you to take into account any advanced reward engineering in this exercise, such as penalizing large velocity and acceleration.
     You can design your own reward function for the bonus question.
 
@@ -80,16 +85,25 @@ def compute_reward(ee_tracking_error: float) -> float:
     Returns:
     - reward: float. The computed reward based on the tracking error. Dimensionality: scalar
     """
-    raise NotImplementedError()
+    dense_reward = np.exp(-2 * ee_tracking_error)
+    sparse_reward = 1.0 if ee_tracking_error < 0.005 else 0.0
+    return dense_reward + sparse_reward
 
 
-def get_obs(qpos: np.ndarray, ee_pos_w: np.ndarray, ee_rot_w: np.ndarray, base_pos_w: np.ndarray, base_rot_w: np.ndarray, target_pos_w: np.ndarray) -> np.ndarray:
+def get_obs(
+    qpos: np.ndarray,
+    ee_pos_w: np.ndarray,
+    ee_rot_w: np.ndarray,
+    base_pos_w: np.ndarray,
+    base_rot_w: np.ndarray,
+    target_pos_w: np.ndarray,
+) -> np.ndarray:
     """
-    TODO: Extract the observation vector from the environment robot state variables. 
+    TODO: Extract the observation vector from the environment robot state variables.
 
-     Note that in Mujoco, states can be directly accessed in the world frame. But for policy genealization, it is important to represent 
+     Note that in Mujoco, states can be directly accessed in the world frame. But for policy genealization, it is important to represent
      the states in the robot's base frame instead of the world frame, so that the policy can be invariant to the robot's absolute position in the world.
-    
+
     Inputs:
     - qpos: np.ndarray. Current joint positions. Dimensionality: 1D array, Shape: (num_joints,).
     - ee_pos_w: np.ndarray. Current end-effector 3D position in world frame. Dimensionality: 1D array, Shape: (3,).
@@ -109,4 +123,23 @@ def get_obs(qpos: np.ndarray, ee_pos_w: np.ndarray, ee_rot_w: np.ndarray, base_p
 
     Hints: You can use the provided functions quat_mul, quat_conjugate, quat_normalize, rot_mat_to_quat for quaternion operations.
     """
-    raise NotImplementedError()
+    if np.all(ee_rot_w == 0):
+        return np.concatenate([qpos, [0, 0, 0], [0, 0, 0, 0], [0, 0, 0]])
+
+    rot_w_eef = Rotation.from_matrix(ee_rot_w)
+    T_world_eef = RigidTransform.from_components(
+        translation=ee_pos_w, rotation=rot_w_eef
+    )
+
+    rot_w_base = Rotation.from_matrix(base_rot_w)
+    T_world_base = RigidTransform.from_components(
+        translation=base_pos_w, rotation=rot_w_base
+    )
+
+    T_base_eff = T_world_base.inv() * T_world_eef
+
+    P_base_target = T_world_base.inv().apply(target_pos_w)
+
+    return np.concatenate(
+        [qpos, T_base_eff.translation, T_base_eff.rotation.as_quat(), P_base_target]
+    )
